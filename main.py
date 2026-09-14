@@ -7,13 +7,13 @@ import uvicorn
 
 app = FastAPI(
     title="Motor Integral de Análisis Eléctrico - 50 Buses ACSR 4/0",
-    version="3.0.0"
+    version="3.1.0"
 )
 
 class AnalisisParams(BaseModel):
     temperatura_ambiente: float = 30.0  # °C
     factor_proyeccion: float = 1.0      # Factor de crecimiento de demanda
-    indice_bus_falla: int = 15          # Nodo seleccionado para estudio de cortocircuito (coincide con Apps Script)
+    indice_bus_falla: int = 15          # Nodo seleccionado para estudio de cortocircuito
 
 def construir_red_50_buses(temp: float, factor_carga: float):
     net = pp.create_empty_network(f_hz=50.0)
@@ -66,6 +66,18 @@ def ejecutar_analisis_sistema(params: AnalisisParams):
     min_voltaje_pu = float(net.res_bus["vm_pu"].min())
     max_cargabilidad_pct = float(net.res_line["loading_percent"].max())
 
+    # Extracción de parámetros eléctricos detallados por cada barra
+    resultados_buses = []
+    for idx in net.bus.index:
+        resultados_buses.append({
+            "indice_bus": int(idx),
+            "nombre_bus": str(net.bus.at[idx, "name"]),
+            "voltaje_pu": round(float(net.res_bus.at[idx, "vm_pu"]), 4),
+            "angulo_grados": round(float(net.res_bus.at[idx, "va_degree"]), 2),
+            "potencia_activa_mw": round(float(net.res_bus.at[idx, "p_mw"]), 4),
+            "potencia_reactiva_mvar": round(float(net.res_bus.at[idx, "q_mvar"]), 4)
+        })
+
     # --- 2. CORTOCIRCUITOS (3F, 2F, 1FN - IEC 60909) ---
     net.ext_grid["s_sc_max_mva"] = 300.0
     net.ext_grid["rx_max"] = 0.1
@@ -113,6 +125,7 @@ def ejecutar_analisis_sistema(params: AnalisisParams):
             "voltaje_minimo_red_pu": round(min_voltaje_pu, 4),
             "maxima_cargabilidad_linea_pct": round(max_cargabilidad_pct, 2)
         },
+        "parametros_por_bus": resultados_buses,
         "cortocircuitos_iec60909": resultados_sc,
         "estabilidad_contingencias_n1": {
             "total_lineas_evaluadas": len(net.line),
@@ -131,3 +144,5 @@ def leer_raiz():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+
