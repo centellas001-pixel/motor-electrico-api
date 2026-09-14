@@ -4,6 +4,39 @@ import pandapower as pp
 import pandapower.shortcircuit as sc
 from pydantic import BaseModel
 
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+# Definir el modelo de datos que recibe desde Apps Script
+class DatosEntrada(BaseModel):
+    temperatura_ambiente: float
+    factor_proyeccion: float
+    indice_bus_falla: int
+
+@app.post("/api/analisis/completo")
+def analisis_completo(datos: DatosEntrada):
+    # Aquí va toda tu lógica de pandapower usando datos.temperatura_ambiente, etc.
+    
+    return {
+        "resultados_flujo_y_perdidas": {
+            "perdidas_tecnicas_totales_kw": 14.2,
+            "voltaje_minimo_red_pu": 0.94,
+            "maxima_cargabilidad_linea_pct": 82.5
+        },
+        "cortocircuitos_iec60909": {
+            "Trifásica": "4.5 kA",
+            "Bifásica": "3.9 kA",
+            "Monofásica a Tierra (1FN)": "3.1 kA"
+        },
+        "estabilidad_contingencias_n1": {
+            "total_lineas_evaluadas": 12,
+            "contingencias_con_violacion_o_colapso": 0
+        }
+    }
+
 app = FastAPI(
     title="Motor Integral de Análisis Eléctrico - 50 Buses ACSR 4/0",
     version="3.0.0"
