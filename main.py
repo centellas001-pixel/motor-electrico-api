@@ -7,7 +7,7 @@ import uvicorn
 
 app = FastAPI(
     title="Motor de Flujo de Potencia Dinámico - Red Eléctrica",
-    version="5.1.0"
+    version="5.2.0"
 )
 
 class TramoTopologia(BaseModel):
@@ -50,20 +50,23 @@ def ejecutar_flujo_dinamico(params: AnalisisDinamicoParams):
     if params.nodos:
         pp.create_ext_grid(net, bus=buses_dict[params.nodos[0]], vm_pu=1.0, mva_base=100.0, name="Subestación Principal Slack")
 
-    # 3. Crear Líneas
+    # 3. Crear Líneas (Verificando que existan ambos nodos)
     for tramo in params.tramos:
         if tramo.origen in buses_dict and tramo.destino in buses_dict:
-            pp.create_line_from_parameters(
-                net,
-                from_bus=buses_dict[tramo.origen],
-                to_bus=buses_dict[tramo.destino],
-                length_km=max(tramo.longitud_km, 0.1),
-                r_ohm_per_km=r_ajustada,
-                x_ohm_per_km=x_km,
-                c_nf_per_km=c_km,
-                max_i_ka=max_i_ka,
-                name=f"Linea_{tramo.origen}_{tramo.destino}"
-            )
+            # Evitar duplicados exactos de líneas
+            existing = net.line[(net.line.from_bus == buses_dict[tramo.origen]) & (net.line.to_bus == buses_dict[tramo.destino])]
+            if len(existing) == 0:
+                pp.create_line_from_parameters(
+                    net,
+                    from_bus=buses_dict[tramo.origen],
+                    to_bus=buses_dict[tramo.destino],
+                    length_km=max(tramo.longitud_km, 0.1),
+                    r_ohm_per_km=r_ajustada,
+                    x_ohm_per_km=x_km,
+                    c_nf_per_km=c_km,
+                    max_i_ka=max_i_ka,
+                    name=f"Linea_{tramo.origen}_{tramo.destino}"
+                )
 
     # 4. Crear Cargas
     for carga in params.cargas:
@@ -76,16 +79,11 @@ def ejecutar_flujo_dinamico(params: AnalisisDinamicoParams):
                 name=f"Carga_{carga.nodo_id}"
             )
 
-    # --- Ejecutar Flujo de Potencia con algoritmo BFSW (Ideal para redes de distribución) ---
+    # --- Ejecutar Flujo de Potencia Robusto (Newton-Raphson con init flat) ---
     try:
-        # Se cambia a 'bfsw' (Back/Forward Sweep) y se amplía el límite de iteraciones
-        pp.runpp(net, algorithm='bfsw', max_iteration=100)
+        pp.runpp(net, algorithm='nr', init="flat", max_iteration=50)
     except Exception as e:
-        try:
-            # Plan B: Si hay mallas cerradas complejas, intenta con Newton-Raphson ampliado
-            pp.runpp(net, algorithm='nr', max_iteration=50, init="flat")
-        except Exception as e2:
-            raise HTTPException(status_code=400, detail=f"Fallo de convergencia en el Flujo de Carga: {str(e2)}")
+        raise HTTPException(status_code=400, detail=f"Fallo de convergencia en el Flujo de Carga: {str(e)}")
 
     perdidas_kw = float(net.res_line["pl_mw"].sum() * 1000)
     min_voltaje_pu = float(net.res_bus["vm_pu"].min())
