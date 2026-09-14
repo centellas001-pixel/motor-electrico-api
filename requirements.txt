@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pandapower
+pandas
+numpy
+pydantic
