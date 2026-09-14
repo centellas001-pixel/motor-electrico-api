@@ -1,64 +1,30 @@
-
 from fastapi import FastAPI, HTTPException
 import pandapower as pp
 import pandapower.shortcircuit as sc
 from pydantic import BaseModel
-
-
-from fastapi import FastAPI
-from pydantic import BaseModel
-
-app = FastAPI()
-
-# Definir el modelo de datos que recibe desde Apps Script
-class DatosEntrada(BaseModel):
-    temperatura_ambiente: float
-    factor_proyeccion: float
-    indice_bus_falla: int
-
-@app.post("/api/analisis/completo")
-def analisis_completo(datos: DatosEntrada):
-    # Aquí va toda tu lógica de pandapower usando datos.temperatura_ambiente, etc.
-    
-    return {
-        "resultados_flujo_y_perdidas": {
-            "perdidas_tecnicas_totales_kw": 14.2,
-            "voltaje_minimo_red_pu": 0.94,
-            "maxima_cargabilidad_linea_pct": 82.5
-        },
-        "cortocircuitos_iec60909": {
-            "Trifásica": "4.5 kA",
-            "Bifásica": "3.9 kA",
-            "Monofásica a Tierra (1FN)": "3.1 kA"
-        },
-        "estabilidad_contingencias_n1": {
-            "total_lineas_evaluadas": 12,
-            "contingencias_con_violacion_o_colapso": 0
-        }
-    }
+import os
+import uvicorn
 
 app = FastAPI(
     title="Motor Integral de Análisis Eléctrico - 50 Buses ACSR 4/0",
     version="3.0.0"
 )
 
-
-
 class AnalisisParams(BaseModel):
     temperatura_ambiente: float = 30.0  # °C
-    factor_proyeccion: float = 1.0     # Factor de crecimiento de demanda
-    bus_falla_idx: int = 15            # Nodo seleccionado para estudio de cortocircuito
+    factor_proyeccion: float = 1.0      # Factor de crecimiento de demanda
+    indice_bus_falla: int = 15          # Nodo seleccionado para estudio de cortocircuito (coincide con Apps Script)
 
 def construir_red_50_buses(temp: float, factor_carga: float):
     net = pp.create_empty_network(f_hz=50.0)
     
     # Parámetros del conductor ACSR 4/0
-    r_20 = 0.548         # Ohm/km a 20°C
-    alpha = 0.00403      # Coeficiente térmico del aluminio
-    r_ajustada = r_20 * (1 + alpha * (temp - 20.0))  # Ajuste a 30°C
-    x_km = 0.410         # Reactancia inductiva Ohm/km
-    c_km = 9.5           # Capacitancia nF/km
-    max_i_ka = 0.260     # Capacidad máxima admisible (260 A)
+    r_20 = 0.548           # Ohm/km a 20°C
+    alpha = 0.00403        # Coeficiente térmico del aluminio
+    r_ajustada = r_20 * (1 + alpha * (temp - 20.0))  # Ajuste térmico
+    x_km = 0.410           # Reactancia inductiva Ohm/km
+    c_km = 9.5             # Capacitancia nF/km
+    max_i_ka = 0.260       # Capacidad máxima admisible (260 A)
 
     # 1. Creación de 50 barras en 24.9 kV
     buses = [pp.create_bus(net, vn_kv=24.9, name=f"Bus_{i+1}") for i in range(50)]
@@ -66,14 +32,14 @@ def construir_red_50_buses(temp: float, factor_carga: float):
     # 2. Generador / Subestación Principal (Slack) en la Barra 0
     pp.create_ext_grid(net, bus=buses[0], vm_pu=1.0, mva_base=100.0, name="Subestación Principal ENDE")
 
-    # 3. Topología de líneas ACSR 4/0 (Estructura mallada/radial)
+    # 3. Topología de líneas ACSR 4/0
     for i in range(49):
         pp.create_line_from_parameters(
             net, from_bus=buses[i], to_bus=buses[i+1], length_km=3.2,
             r_ohm_per_km=r_ajustada, x_ohm_per_km=x_km, c_nf_per_km=c_km,
             max_i_ka=max_i_ka, name=f"Linea_{i+1}_{i+2}"
         )
-    # Cierre de anillo para dar robustez mallada
+    # Cierre de anillo
     pp.create_line_from_parameters(
         net, from_bus=buses[49], to_bus=buses[5], length_km=5.0,
         r_ohm_per_km=r_ajustada, x_ohm_per_km=x_km, c_nf_per_km=c_km,
@@ -107,7 +73,7 @@ def ejecutar_analisis_sistema(params: AnalisisParams):
     net.ext_grid["rx_min"] = 0.1
 
     resultados_sc = {}
-    target_bus = params.bus_falla_idx
+    target_bus = params.indice_bus_falla
 
     tipos_falla = {"3ph": "Trifásica", "2ph": "Bifásica", "1ph": "Monofásica a Tierra (1FN)"}
     for codigo, nombre in tipos_falla.items():
@@ -161,9 +127,6 @@ def leer_raiz():
         "estado": "Activo",
         "documentacion": "/docs"
     }
-
-import os
-import uvicorn
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
