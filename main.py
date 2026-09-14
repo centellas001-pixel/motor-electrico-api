@@ -2,34 +2,35 @@ from fastapi import FastAPI, HTTPException
 import pandapower as pp
 import pandapower.shortcircuit as sc
 from pydantic import BaseModel
+import copy
 import os
 import uvicorn
 
 app = FastAPI(
     title="Motor Integral de Análisis Eléctrico - 50 Buses ACSR 4/0",
-    version="3.0.0"
+    version="3.1.0"
 )
 
 class AnalisisParams(BaseModel):
     temperatura_ambiente: float = 30.0  # °C
     factor_proyeccion: float = 1.0      # Factor de crecimiento de demanda
-    indice_bus_falla: int = 15          # Nodo seleccionado para estudio de cortocircuito (coincide con Apps Script)
+    indice_bus_falla: int = 15          # Nodo seleccionado para cortocircuito
 
 def construir_red_50_buses(temp: float, factor_carga: float):
     net = pp.create_empty_network(f_hz=50.0)
     
     # Parámetros del conductor ACSR 4/0
-    r_20 = 0.548           # Ohm/km a 20°C
-    alpha = 0.00403        # Coeficiente térmico del aluminio
-    r_ajustada = r_20 * (1 + alpha * (temp - 20.0))  # Ajuste térmico
-    x_km = 0.410           # Reactancia inductiva Ohm/km
-    c_km = 9.5             # Capacitancia nF/km
-    max_i_ka = 0.260       # Capacidad máxima admisible (260 A)
+    r_20 = 0.548           
+    alpha = 0.00403        
+    r_ajustada = r_20 * (1 + alpha * (temp - 20.0))  
+    x_km = 0.410           
+    c_km = 9.5             
+    max_i_ka = 0.260       
 
     # 1. Creación de 50 barras en 24.9 kV
     buses = [pp.create_bus(net, vn_kv=24.9, name=f"Bus_{i+1}") for i in range(50)]
 
-    # 2. Generador / Subestación Principal (Slack) en la Barra 0
+    # 2. Subestación Principal (Slack) en la Barra 0
     pp.create_ext_grid(net, bus=buses[0], vm_pu=1.0, mva_base=100.0, name="Subestación Principal ENDE")
 
     # 3. Topología de líneas ACSR 4/0
@@ -46,7 +47,7 @@ def construir_red_50_buses(temp: float, factor_carga: float):
         max_i_ka=max_i_ka, name="Linea_Anillo_Cierre"
     )
 
-    # 4. Cargas distribuidas con factor de proyección
+    # 4. Cargas distribuidas
     for i in range(1, 50):
         pp.create_load(net, bus=buses[i], p_mw=0.12 * factor_carga, q_mvar=0.04 * factor_carga, name=f"Carga_{i+1}")
 
@@ -58,9 +59,9 @@ def ejecutar_analisis_sistema(params: AnalisisParams):
     
     # --- 1. FLUJO DE CARGA Y PÉRDIDAS ---
     try:
-        pp.runpp(net, algorithm='nr')
+        pp.runpp(net, algorithm='nr', max_iteration=20)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Fallo de convergencia en Flujo de Carga: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Fallo de convergencia en Flujo de Carga Base: {str(e)}")
 
     perdidas_kw = float(net.res_line["pl_mw"].sum() * 1000)
     min_voltaje_pu = float(net.res_bus["vm_pu"].min())
@@ -84,16 +85,21 @@ def ejecutar_analisis_sistema(params: AnalisisParams):
         except Exception as ex:
             resultados_sc[nombre] = f"No disponible: {str(ex)}"
 
-    # --- 3. ESTABILIDAD Y CONTINGENCIAS N-1 ---
+    # --- 3. ESTABILIDAD Y CONTINGENCIAS N-1 (Optimizado) ---
     contingencias_criticas = 0
+    total_lineas = len(net.line)
+    
     for line_id in net.line.index:
-        net_n1 = construir_red_50_buses(params.temperatura_ambiente, params.factor_proyeccion)
+        # Copia rápida en memoria en lugar de reconstruir todo desde cero
+        net_n1 = copy.deepcopy(net)
         net_n1.line.loc[line_id, "in_service"] = False
         try:
-            pp.runpp(net_n1, max_iteration=40)
+            # Menos iteraciones máximas para evitar bloqueos por divergencia
+            pp.runpp(net_n1, max_iteration=15, init="flat")
             if net_n1.res_bus["vm_pu"].min() < 0.90 or net_n1.res_line["loading_percent"].max() > 100.0:
                 contingencias_criticas += 1
-        except:
+        except Exception:
+            # Si diverge o falla el cálculo por la apertura de línea, se cuenta como criticidad/colapso
             contingencias_criticas += 1
 
     r_20 = 0.548
@@ -101,7 +107,7 @@ def ejecutar_analisis_sistema(params: AnalisisParams):
     r_efectiva = r_20 * (1 + alpha * (params.temperatura_ambiente - 20.0))
 
     return {
-        "estado": "Análisis completado con éxito",
+        eta if "estado" else "estado": "Análisis completado con éxito",
         "datos_operativos_entrada": {
             "temperatura_ambiente_c": params.temperatura_ambiente,
             "resistencia_acsr_40_ohm_km": round(r_efectiva, 4),
@@ -115,7 +121,7 @@ def ejecutar_analisis_sistema(params: AnalisisParams):
         },
         "cortocircuitos_iec60909": resultados_sc,
         "estabilidad_contingencias_n1": {
-            "total_lineas_evaluadas": len(net.line),
+            "total_lineas_evaluadas": total_lineas,
             "contingencias_con_violacion_o_colapso": contingencias_criticas
         }
     }
