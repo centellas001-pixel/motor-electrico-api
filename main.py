@@ -7,10 +7,10 @@ import uvicorn
 
 app = FastAPI(
     title="Motor de Flujo de Potencia Dinámico - Red Eléctrica",
-    version="5.0.0"
+    version="5.1.0"
 )
 
-class TramoTopologia(BaseModel) :
+class TramoTopologia(BaseModel):
     origen: str
     destino: str
     longitud_km: float
@@ -23,10 +23,10 @@ class CargaBus(BaseModel):
 class AnalisisDinamicoParams(BaseModel):
     temperatura_ambiente: float = 25.0
     factor_proyeccion: float = 1.0
-    nodos: List[str]                  # Lista de IDs de nodos (ej: ["N01", "N02", ...])
-    nombres_nodos: Dict[str, str]     # Diccionario de nombres
-    tramos: List[TramoTopologia]      # Lista de líneas (origen -> destino)
-    cargas: List[CargaBus]            # Cargas conectadas por nodo
+    nodos: List[str]
+    nombres_nodos: Dict[str, str]
+    tramos: List[TramoTopologia]
+    cargas: List[CargaBus]
 
 @app.post("/api/analisis/dinamico")
 def ejecutar_flujo_dinamico(params: AnalisisDinamicoParams):
@@ -46,11 +46,11 @@ def ejecutar_flujo_dinamico(params: AnalisisDinamicoParams):
         nombre = params.nombres_nodos.get(nid, nid)
         buses_dict[nid] = pp.create_bus(net, vn_kv=24.9, name=nombre)
 
-    # 2. Subestación Slack en el primer nodo (ej: N01)
+    # 2. Subestación Slack en el primer nodo (N01)
     if params.nodos:
         pp.create_ext_grid(net, bus=buses_dict[params.nodos[0]], vm_pu=1.0, mva_base=100.0, name="Subestación Principal Slack")
 
-    # 3. Crear Líneas (Soporta Radial o Mallado según los tramos enviados)
+    # 3. Crear Líneas
     for tramo in params.tramos:
         if tramo.origen in buses_dict and tramo.destino in buses_dict:
             pp.create_line_from_parameters(
@@ -76,11 +76,16 @@ def ejecutar_flujo_dinamico(params: AnalisisDinamicoParams):
                 name=f"Carga_{carga.nodo_id}"
             )
 
-    # --- Ejecutar Flujo de Potencia ---
+    # --- Ejecutar Flujo de Potencia con algoritmo BFSW (Ideal para redes de distribución) ---
     try:
-        pp.runpp(net, algorithm='nr')
+        # Se cambia a 'bfsw' (Back/Forward Sweep) y se amplía el límite de iteraciones
+        pp.runpp(net, algorithm='bfsw', max_iteration=100)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Fallo de convergencia en el Flujo de Carga: {str(e)}")
+        try:
+            # Plan B: Si hay mallas cerradas complejas, intenta con Newton-Raphson ampliado
+            pp.runpp(net, algorithm='nr', max_iteration=50, init="flat")
+        except Exception as e2:
+            raise HTTPException(status_code=400, detail=f"Fallo de convergencia en el Flujo de Carga: {str(e2)}")
 
     perdidas_kw = float(net.res_line["pl_mw"].sum() * 1000)
     min_voltaje_pu = float(net.res_bus["vm_pu"].min())
